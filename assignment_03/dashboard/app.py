@@ -45,17 +45,20 @@ def cv_scores(depth, k):
 
 # Bootstrap: in round b, draw len(X) rows with replacement (random_state=b),
 # train on them and test on the rows that were not drawn (out-of-bag).
+# Also keeps how many out-of-bag rows each round was tested on.
 # Cached because 200 rounds take a few seconds.
 @st.cache_data
 def bootstrap_scores(depth, rounds):
     rows = np.arange(len(X))
     scores = []
+    oob_sizes = []
     for b in range(rounds):
         train_rows = resample(rows, replace=True, n_samples=len(X), random_state=b)
         test_rows = np.setdiff1d(rows, train_rows)
         tree = make_tree(depth).fit(X.iloc[train_rows], y.iloc[train_rows])
         scores.append(accuracy_score(y.iloc[test_rows], tree.predict(X.iloc[test_rows])))
-    return np.array(scores)
+        oob_sizes.append(len(test_rows))
+    return np.array(scores), np.array(oob_sizes)
 
 
 # Page title and the one tab
@@ -85,37 +88,59 @@ with tab:
     # Holdout: accuracy on the passengers that were held out
     if method == "Holdout":
         acc = accuracy_score(y_test, y_pred)
-        st.metric(f"Holdout accuracy ({len(y_test)} test passengers)", f"{acc:.2%}")
+        col1, col2, col3 = st.columns(3)
+        col1.metric(f"Holdout accuracy ({len(y_test)} test passengers)", f"{acc:.2%}")
+        col2.metric("Training rows", len(X_train))
+        col3.metric("Test rows", len(X_test))
         st.code(f"X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={test_size:.2f}, stratify=y, random_state=1)\n"
-                "accuracy_score(y_test, tree.predict(X_test))")
+                "accuracy_score(y_test, tree.predict(X_test))\n"
+                "len(X_train), len(X_test)   # rows used to train and to test")
 
     # Cross validation: mean and standard deviation of the k fold accuracies
     elif method == "k-fold cross validation":
         k = st.slider("Number of folds k", min_value=3, max_value=10, value=5)
         scores = cv_scores(depth, k)
-        col1, col2 = st.columns(2)
+        # Standard error of the mean: how much the mean itself could move
+        std_error = scores.std() / np.sqrt(k)
+        col1, col2, col3 = st.columns(3)
         col1.metric("Mean accuracy", f"{scores.mean():.2%}")
         col2.metric("Standard deviation", f"{scores.std():.2%}")
+        col3.metric("Standard error (SD / √k)", f"{std_error:.2%}")
+
+        # Rows in each fold: the same folds cross_val_score used
+        folds = StratifiedKFold(n_splits=k, shuffle=True, random_state=1)
+        fold_rows = [(len(train), len(test)) for train, test in folds.split(X, y)]
         st.dataframe(pd.DataFrame({"Fold": range(1, k + 1),
+                                   "Training rows": [r[0] for r in fold_rows],
+                                   "Test rows": [r[1] for r in fold_rows],
                                    "Accuracy": [f"{s:.2%}" for s in scores]}),
                      hide_index=True)
         st.code(f"folds = StratifiedKFold(n_splits={k}, shuffle=True, random_state=1)\n"
                 "scores = cross_val_score(make_tree(depth), X, y, cv=folds)\n"
-                "scores.mean(), scores.std()")
+                "scores.mean(), scores.std()\n"
+                f"scores.std() / np.sqrt({k})   # standard error\n"
+                "[(len(train), len(test)) for train, test in folds.split(X, y)]   # rows per fold")
 
     # Bootstrap: mean out-of-bag accuracy and the middle 95% of the rounds
     else:
         rounds = st.slider("Number of bootstrap rounds", min_value=10, max_value=200, value=100)
-        scores = bootstrap_scores(depth, rounds)
+        scores, oob_sizes = bootstrap_scores(depth, rounds)
         low, high = np.percentile(scores, 2.5), np.percentile(scores, 97.5)
         col1, col2 = st.columns(2)
         col1.metric("Mean out-of-bag accuracy", f"{scores.mean():.2%}")
         col2.metric("Middle 95% of rounds", f"{low:.2%} to {high:.2%}")
+        col3, col4 = st.columns(2)
+        col3.metric("Rounds used", len(scores))
+        col4.metric("Out-of-bag test rows per round",
+                    f"{oob_sizes.mean():.0f} on average ({oob_sizes.min()} to {oob_sizes.max()})")
+        st.caption(f"Each round trains on {len(X)} rows drawn with replacement.")
         st.code(f"for b in range({rounds}):\n"
                 "    train_rows = resample(rows, replace=True, n_samples=len(X), random_state=b)\n"
                 "    test_rows = np.setdiff1d(rows, train_rows)   # out-of-bag passengers\n"
                 "    accuracy_score(y.iloc[test_rows], tree.predict(X.iloc[test_rows]))\n"
-                "np.percentile(scores, 2.5), np.percentile(scores, 97.5)")
+                "np.percentile(scores, 2.5), np.percentile(scores, 97.5)\n"
+                "len(scores)   # rounds used\n"
+                "len(test_rows)   # out-of-bag rows in one round")
 
     # ---------- 2. Confusion matrix on the holdout split ----------
     st.header("2. Confusion matrix (holdout split)")
